@@ -12,6 +12,8 @@ import requests
 import os
 from pydub import AudioSegment
 from pydub.effects import high_pass_filter, low_pass_filter
+import math
+
 
 
 def load_env_file(path: str) -> None:
@@ -167,10 +169,102 @@ def run_delta():
         print("Stopped by user")
     finally:
         lmu.close()
+        
+def get_relative_position(myCar, other_car):
+    """Get side, forward distance and total distance to another car.
+    Returns: (side_value, forward_value, distance)
+    - side_value > 0: car on RIGHT, < 0: on LEFT
+    - forward_value > 0: car ahead, < 0: car behind
+    """
+    dx = other_car.mPos.x - myCar.mPos.x
+    dy = other_car.mPos.y - myCar.mPos.y
+    dz = other_car.mPos.z - myCar.mPos.z
+    
+    ori = myCar.mOri
+    # Right vector (lateral)
+    right_x = ori[1].x
+    right_y = ori[1].y
+    right_z = ori[1].z
+    # Forward vector (longitudinal)
+    forward_x = ori[0].x
+    forward_y = ori[0].y
+    forward_z = ori[0].z
+    
+    # Project onto right and forward vectors
+    side_value = (dx * right_x) + (dy * right_y) + (dz * right_z)
+    forward_value = (dx * forward_x) + (dy * forward_y) + (dz * forward_z)
+    
+    # Calculate total distance
+    distance = math.sqrt(dx*dx + dy*dy + dz*dz)
+    
+    return side_value, forward_value, distance
+
+
+def left_right_engineer():
+    """Main radar function to detect nearby cars and their position."""
+    lmu = MMapControl(LMUConstants.LMU_SHARED_MEMORY_FILE, lmu_data.LMUObjectOut)
+    lmu.create(0)
+    alongside_state = {}
+    try:
+        while True:
+            lmu.update()
+            data = lmu.data
+            
+            if not is_game_running(data):
+                print("Waiting for game...")
+                time.sleep(1.0)
+                continue
+
+            player_index = data.telemetry.playerVehicleIdx
+            if player_index < 0 or player_index >= data.scoring.scoringInfo.mNumVehicles:
+                player_index = 0
+            
+            my_car = data.scoring.vehScoringInfo[player_index]
+            my_telemetry = data.telemetry.telemInfo[player_index]
+
+            # Only scan when the nearest car ahead or behind is within 1 second
+            if abs(my_telemetry.mTimeGapCarAhead) >= 1.0 and abs(my_telemetry.mTimeGapCarBehind) >= 1.0:
+                alongside_state.clear()
+                time.sleep(0.05)
+                continue
+
+            num_cars = data.scoring.scoringInfo.mNumVehicles
+            alongside_zone = 10.0
+            side_threshold = 1.0
+            active_cars = min(data.telemetry.activeVehicles, num_cars)
+            
+            for i in range(active_cars):
+                if i == player_index:
+                    continue
+                
+                other_car = data.scoring.vehScoringInfo[i]
+                if other_car.mInPits or other_car.mFinishStatus == 2:
+                    continue
+                
+                side, forward, dist = get_relative_position(my_car, other_car)
+
+                if abs(side) > side_threshold and abs(forward) < alongside_zone:
+                    current_state = "RIGHT" if side > 0 else "LEFT"
+                else:
+                    current_state = None
+
+                previous_state = alongside_state.get(i)
+                if current_state != previous_state:
+                    if current_state is not None:
+                        print(f"Car {i}: alongside {current_state} (fwd={forward:.1f}m, side={side:.1f}m)")
+                        alongside_state[i] = current_state
+                    else:
+                        alongside_state.pop(i, None)
+            
+            time.sleep(0.05)
+    except KeyboardInterrupt:
+        print("Stopped")
+    finally:
+        lmu.close()
 
 
 if __name__ == "__main__":
-    run_delta()
+    left_right_engineer()
     
     
     
